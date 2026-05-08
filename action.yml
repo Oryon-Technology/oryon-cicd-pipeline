@@ -1,0 +1,58 @@
+name: Oryon Security Scan
+description: Public Oryon CI/CD wrapper. Downloads and runs the authorized private scanner at runtime.
+author: Oryon Technology
+
+inputs:
+  backend-url:
+    description: Oryon backend base URL.
+    required: false
+    default: https://dashboard.oryontechnology.com
+  workspace:
+    description: Workspace path to scan.
+    required: false
+    default: .
+  out-dir:
+    description: Directory where local artifacts are written, relative to workspace unless absolute.
+    required: false
+    default: .oryon
+  scanner-version:
+    description: Scanner release channel or exact version requested from Oryon.
+    required: false
+    default: v1
+  upload:
+    description: Upload scan results to Oryon.
+    required: false
+    default: "true"
+  ai:
+    description: Request an Oryon AI key and run AI enrichment in the runner.
+    required: false
+    default: "true"
+  report:
+    description: Report artifact type to request from Oryon. Use none or pdf.
+    required: false
+    default: none
+  sarif:
+    description: Write a SARIF artifact.
+    required: false
+    default: "true"
+  fail-on:
+    description: Minimum severity that fails the job. Use none, low, medium, high, or critical.
+    required: false
+    default: none
+
+outputs:
+  findings:
+    description: Number of findings produced by the scan when the scanner writes an Oryon results artifact.
+  results-path:
+    description: Local path to the JSON results artifact.
+  summary-path:
+    description: Local path to the Markdown summary artifact.
+  report-path:
+    description: Local path to the generated or downloaded report.
+  sarif-path:
+    description: Local path to the SARIF artifact.
+
+runs:
+  using: node24
+  main: dist/action.cjs
+

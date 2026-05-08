@@ -1,0 +1,103 @@
+name: Oryon Security Scan
+
+on:
+  workflow_call:
+    inputs:
+      backend-url:
+        description: Oryon backend base URL.
+        required: false
+        type: string
+        default: https://dashboard.oryontechnology.com
+      scanner-version:
+        description: Scanner release channel or exact version requested from Oryon.
+        required: false
+        type: string
+        default: v1
+      fail-on:
+        description: Minimum severity that fails the job.
+        required: false
+        type: string
+        default: none
+      ai:
+        description: Request an Oryon AI key and run AI enrichment in the runner.
+        required: false
+        type: boolean
+        default: true
+      upload:
+        description: Upload scan results to Oryon.
+        required: false
+        type: boolean
+        default: true
+      report:
+        description: Report artifact type to request from Oryon. Use none or pdf.
+        required: false
+        type: string
+        default: none
+      sarif:
+        description: Write a SARIF artifact.
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      ORYON_CI_TOKEN:
+        description: Project-scoped Oryon CI token.
+        required: true
+    outputs:
+      findings:
+        description: Number of findings produced by the scan.
+        value: ${{ jobs.scan.outputs.findings }}
+      results-path:
+        description: Local path to the JSON results artifact.
+        value: ${{ jobs.scan.outputs.results-path }}
+      summary-path:
+        description: Local path to the Markdown summary artifact.
+        value: ${{ jobs.scan.outputs.summary-path }}
+      report-path:
+        description: Local path to the generated or downloaded report.
+        value: ${{ jobs.scan.outputs.report-path }}
+      sarif-path:
+        description: Local path to the SARIF artifact.
+        value: ${{ jobs.scan.outputs.sarif-path }}
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      findings: ${{ steps.oryon.outputs.findings }}
+      results-path: ${{ steps.oryon.outputs.results-path }}
+      summary-path: ${{ steps.oryon.outputs.summary-path }}
+      report-path: ${{ steps.oryon.outputs.report-path }}
+      sarif-path: ${{ steps.oryon.outputs.sarif-path }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          path: repo
+
+      - name: Run Oryon scan
+        id: oryon
+        uses: Oryon-Technology/oryon-cicd-pipeline@v1
+        with:
+          backend-url: ${{ inputs.backend-url }}
+          scanner-version: ${{ inputs.scanner-version }}
+          workspace: repo
+          out-dir: .oryon
+          ai: ${{ inputs.ai }}
+          upload: ${{ inputs.upload }}
+          report: ${{ inputs.report }}
+          sarif: ${{ inputs.sarif }}
+          fail-on: ${{ inputs.fail-on }}
+        env:
+          ORYON_CI_TOKEN: ${{ secrets.ORYON_CI_TOKEN }}
+
+      - name: Upload Oryon artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: oryon-security-scan
+          path: repo/.oryon/
+          if-no-files-found: warn
+          include-hidden-files: true

@@ -1,0 +1,32 @@
+{
+  "name": "@oryon/cicd-pipeline",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Public Oryon CI/CD wrapper for GitHub Actions.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/action.cjs",
+  "files": [
+    "action.yml",
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check-types": "tsc --noEmit",
+    "test:unit": "tsx --test test/*.test.ts",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "@actions/core": "^3.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.x",
+    "esbuild": "^0.25.9",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
