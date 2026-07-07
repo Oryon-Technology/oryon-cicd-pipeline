@@ -1,10 +1,10 @@
 # Oryon CI/CD Pipeline
 
-Public GitHub Actions entrypoint for Oryon security scans.
+Public CI/CD wrapper for Oryon security scans.
 
-This repository contains only the public CI wrapper. The scanner engine and proprietary analysis logic are not stored here. Authorized GitHub Actions runs receive the scanner at runtime.
+This repository contains only the public bootstrap layer. The scanner engine and proprietary analysis logic are not stored here. Authorized CI runs receive the private scanner at runtime from Oryon.
 
-## Client Workflow
+## GitHub Actions
 
 ```yaml
 name: Oryon Security Scan
@@ -24,13 +24,42 @@ jobs:
       ORYON_CI_TOKEN: ${{ secrets.ORYON_CI_TOKEN }}
 ```
 
-## Required Secret
-
 Configure `ORYON_CI_TOKEN` as a repository or organization secret in GitHub.
+
+## Azure Pipelines
+
+```yaml
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+    persistCredentials: false
+
+  - bash: |
+      set -euo pipefail
+      curl -fsSL https://raw.githubusercontent.com/Oryon-Technology/oryon-cicd-pipeline/v1/azure/oryon-scan.sh | bash
+    displayName: Oryon Security Scan
+    env:
+      ORYON_CI_TOKEN: $(ORYON_CI_TOKEN)
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+```
+
+Configure `ORYON_CI_TOKEN` as a secret pipeline variable in Azure DevOps.
 
 The token is project-scoped and can be rotated or revoked from Oryon.
 
-## Inputs
+## GitHub Inputs
 
 | Input | Default | Description |
 | --- | --- | --- |
@@ -42,14 +71,29 @@ The token is project-scoped and can be rotated or revoked from Oryon.
 | `report` | `none` | Report artifact type: `none` or `pdf`. |
 | `sarif` | `true` | Writes a SARIF artifact when supported by the scanner. |
 
+## Azure Environment Options
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `ORYON_BACKEND_URL` | `https://dashboard.oryontechnology.com` | Oryon service URL. |
+| `ORYON_SCANNER_VERSION` | `v1` | Scanner release channel. |
+| `ORYON_WORKSPACE` | `$(Build.SourcesDirectory)` | Workspace path to scan. |
+| `ORYON_OUT_DIR` | `.oryon` | Directory where local artifacts are written. |
+| `ORYON_FAIL_ON` | `none` | Minimum severity that fails the job: `none`, `low`, `medium`, `high`, or `critical`. |
+| `ORYON_AI` | `true` | Enables AI enrichment in the runner. |
+| `ORYON_UPLOAD` | `true` | Uploads scan results to Oryon. |
+| `ORYON_REPORT` | `none` | Report artifact type: `none` or `pdf`. |
+| `ORYON_SARIF` | `true` | Writes a SARIF artifact when supported by the scanner. |
+| `ORYON_CICD_REF` | `v1` | Wrapper ref used by `azure/oryon-scan.sh` to download `oryon-scan.mjs`. |
+
 ## What It Does
 
-The reusable workflow checks out the customer repository, validates the CI run with Oryon, runs the authorized scanner in the GitHub runner, and uploads local scan artifacts from `.oryon/`.
+The wrapper validates the CI run with Oryon using the provider OIDC token, downloads the authorized scanner, verifies the scanner SHA256, runs it in the CI runner, and writes local scan artifacts under `.oryon/`.
 
 ## Security Notes
 
 - Customers only configure `ORYON_CI_TOKEN`.
-- Provider keys are not stored in customer GitHub secrets.
+- Provider keys are not stored in customer CI secrets.
 - Scanner artifacts are short-lived and integrity checked before execution.
 - CI access is project-scoped and controlled by Oryon policy.
-- Direct use outside the approved reusable workflow can be rejected by Oryon.
+- Direct use outside the approved repository, pipeline, ref, or reusable workflow can be rejected by Oryon.

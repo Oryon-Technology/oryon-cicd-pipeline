@@ -2,12 +2,13 @@
   "name": "@oryon/cicd-pipeline",
   "version": "0.1.0",
   "private": true,
-  "description": "Public Oryon CI/CD wrapper for GitHub Actions.",
+  "description": "Public Oryon CI/CD wrapper for GitHub Actions and Azure Pipelines.",
   "license": "MIT",
   "type": "module",
   "main": "dist/action.cjs",
   "files": [
     "action.yml",
+    "azure",
     "dist",
     "README.md"
   ],
