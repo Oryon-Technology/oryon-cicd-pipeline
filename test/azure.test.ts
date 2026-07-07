@@ -10,6 +10,7 @@ const {
   extractOidcToken,
   normalizeBootstrapLease,
   readAzureOptions,
+  requestAzureOidcToken,
   requestBootstrap
 } = azureWrapper;
 
@@ -67,6 +68,23 @@ test("extracts Azure OIDC token from known response shapes", () => {
   assert.equal(extractOidcToken(JSON.stringify({ oidcToken: "token-a" })), "token-a");
   assert.equal(extractOidcToken(JSON.stringify({ id_token: "token-b" })), "token-b");
   assert.equal(extractOidcToken("eyJabc.def.ghi"), "eyJabc.def.ghi");
+});
+
+test("requests Azure OIDC token with API version", async () => {
+  const fetchImpl = async (url: string, init: RequestInit) => {
+    assert.equal(url, "https://dev.azure.com/oryontechnology/_apis/distributedtask/hubs/build/plans/plan/jobs/job/oidctoken?api-version=7.1");
+    assert.equal(init.method, "POST");
+    assert.equal((init.headers as Record<string, string>).Authorization, "Bearer system-token");
+
+    return new Response(JSON.stringify({ oidcToken: "azure-oidc" }));
+  };
+
+  const token = await requestAzureOidcToken({
+    SYSTEM_OIDCREQUESTURI: "https://dev.azure.com/oryontechnology/_apis/distributedtask/hubs/build/plans/plan/jobs/job/oidctoken",
+    SYSTEM_ACCESSTOKEN: "system-token"
+  }, fetchImpl);
+
+  assert.equal(token, "azure-oidc");
 });
 
 test("requests Oryon bootstrap with Azure OIDC header", async () => {

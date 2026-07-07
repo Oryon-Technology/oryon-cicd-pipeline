@@ -12,6 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const WRAPPER_VERSION = "0.1.0";
 const DEFAULT_BACKEND_URL = "https://dashboard.oryontechnology.com";
+const AZURE_DEVOPS_API_VERSION = "7.1";
 const AZURE_OIDC_HEADER = "X-Oryon-Azure-OIDC-Token";
 const failOnValues = new Set(["none", "low", "medium", "high", "critical"]);
 const reportValues = new Set(["none", "pdf"]);
@@ -76,7 +77,7 @@ export async function requestAzureOidcToken(env = process.env, fetchImpl = fetch
     headers.Authorization = `Bearer ${systemAccessToken}`;
   }
 
-  const response = await fetchImpl(requestUri, {
+  const response = await fetchImpl(withAzureDevOpsApiVersion(requestUri), {
     method: "POST",
     headers
   });
@@ -86,6 +87,21 @@ export async function requestAzureOidcToken(env = process.env, fetchImpl = fetch
   }
 
   return extractOidcToken(text);
+}
+
+function withAzureDevOpsApiVersion(rawUrl) {
+  try {
+    const url = new URL(rawUrl);
+    if (!url.searchParams.has("api-version")) {
+      url.searchParams.set("api-version", AZURE_DEVOPS_API_VERSION);
+    }
+    return url.toString();
+  } catch {
+    if (/[?&]api-version=/.test(rawUrl)) {
+      return rawUrl;
+    }
+    return `${rawUrl}${rawUrl.includes("?") ? "&" : "?"}api-version=${AZURE_DEVOPS_API_VERSION}`;
+  }
 }
 
 export function extractOidcToken(raw) {
