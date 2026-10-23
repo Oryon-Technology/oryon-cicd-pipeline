@@ -59,3 +59,9 @@ test("maps OpenAI bootstrap leases into process env", () => {
   assert.equal(env.ORYON_AI_PROVIDER_KEY, "test-provider-key");
   assert.equal(env.OPENAI_API_KEY, "test-provider-key");
 });
+
+test("passes the Oryon proxy origin to the private scanner", () => {
+  const env = buildScannerEnv({ciToken: "oryon_ci_test", ai: {provider: "oryon", key: "oryon_ai_test", baseUrl: "https://dashboard.oryontechnology.com/api/v1/ai", expiresAt: "2026-10-23T10:00:00Z"}});
+  assert.equal(env.ORYON_AI_BASE_URL, "https://dashboard.oryontechnology.com/api/v1/ai");
+  assert.equal(env.ORYON_AI_PROVIDER_KEY, "oryon_ai_test");
+});

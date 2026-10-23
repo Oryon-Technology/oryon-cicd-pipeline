@@ -34,6 +34,7 @@ export interface ScannerLease {
 }
 
 export interface AiLease {
+  baseUrl?: string;
   provider?: string;
   key: string;
   expiresAt?: string;

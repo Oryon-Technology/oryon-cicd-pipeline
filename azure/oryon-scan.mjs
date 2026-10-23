@@ -203,6 +203,7 @@ export function normalizeBootstrapLease(payload) {
   if (aiKey) {
     lease.ai = {
       key: aiKey,
+      baseUrl: stringValue(ai.base_url),
       provider: stringValue(ai.provider),
       expiresAt: stringValue(ai.expires_at)
     };
@@ -267,6 +268,7 @@ export function buildScannerEnv({ env = process.env, ciToken, ai }) {
   };
 
   if (ai) {
+    scannerEnv.ORYON_AI_BASE_URL = ai.baseUrl ?? "";
     scannerEnv.ORYON_AI_PROVIDER = ai.provider ?? "";
     scannerEnv.ORYON_AI_PROVIDER_KEY = ai.key;
     scannerEnv.ORYON_AI_EXPIRES_AT = ai.expiresAt ?? "";

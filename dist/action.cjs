@@ -20031,6 +20031,7 @@ function normalizeBootstrapLease(payload) {
   if (aiKey) {
     lease.ai = {
       key: aiKey,
+      baseUrl: stringValue(ai.base_url),
       provider: stringValue(ai.provider),
       expiresAt: stringValue(ai.expires_at)
     };
@@ -20247,6 +20248,7 @@ function buildScannerEnv(input) {
     ORYON_CI_TOKEN: input.ciToken
   };
   if (input.ai) {
+    env.ORYON_AI_BASE_URL = input.ai.baseUrl ?? "";
     env.ORYON_AI_PROVIDER = input.ai.provider ?? "";
     env.ORYON_AI_PROVIDER_KEY = input.ai.key;
     env.ORYON_AI_EXPIRES_AT = input.ai.expiresAt ?? "";

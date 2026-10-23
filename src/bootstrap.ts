@@ -80,6 +80,7 @@ export function normalizeBootstrapLease(payload: unknown): BootstrapLease {
   if (aiKey) {
     lease.ai = {
       key: aiKey,
+      baseUrl: stringValue(ai.base_url),
       provider: stringValue(ai.provider),
       expiresAt: stringValue(ai.expires_at)
     };
