@@ -19952,6 +19952,9 @@ function debug(message) {
 function error(message, properties = {}) {
   issueCommand("error", toCommandProperties(properties), message instanceof Error ? message.toString() : message);
 }
+function warning(message, properties = {}) {
+  issueCommand("warning", toCommandProperties(properties), message instanceof Error ? message.toString() : message);
+}
 function info(message) {
   process.stdout.write(message + os4.EOL);
 }
@@ -19961,8 +19964,137 @@ function getIDToken(aud) {
   });
 }
 
+// src/action.ts
+var import_node_crypto2 = require("node:crypto");
+var import_promises5 = __toESM(require("node:fs/promises"), 1);
+
+// src/diagnostics.ts
+var import_promises = __toESM(require("node:fs/promises"), 1);
+
+// src/config.ts
+var import_node_path = __toESM(require("node:path"), 1);
+var DEFAULT_BACKEND_URL = "https://dashboard.oryontechnology.com";
+var failOnValues = /* @__PURE__ */ new Set(["none", "low", "medium", "high", "critical"]);
+var reportValues = /* @__PURE__ */ new Set(["none", "pdf"]);
+function readActionOptions() {
+  const workspaceInput = getInput("workspace") || ".";
+  const outDir = getInput("out-dir") || ".oryon";
+  return {
+    backendUrl: normalizeBackendUrl(getInput("backend-url") || DEFAULT_BACKEND_URL),
+    workspace: import_node_path.default.resolve(workspaceInput),
+    outDir,
+    scannerVersion: getInput("scanner-version") || "v1",
+    upload: getBooleanInput("upload"),
+    ai: getBooleanInput("ai"),
+    report: parseReport(getInput("report") || "none"),
+    sarif: getBooleanInput("sarif"),
+    failOn: parseFailOn(getInput("fail-on") || "none")
+  };
+}
+function artifactPath(workspace, outDir, filename) {
+  const base = import_node_path.default.isAbsolute(outDir) ? outDir : import_node_path.default.resolve(workspace, outDir);
+  return import_node_path.default.join(base, filename);
+}
+function normalizeBackendUrl(raw) {
+  const parsed = new URL(raw);
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error(`Unsupported backend URL protocol: ${parsed.protocol}`);
+  }
+  return parsed.origin;
+}
+function parseFailOn(raw) {
+  const value = raw.toLowerCase();
+  if (!failOnValues.has(value)) {
+    throw new Error(`Invalid fail-on value "${raw}". Use none, low, medium, high, or critical.`);
+  }
+  return value;
+}
+function parseReport(raw) {
+  const value = raw.toLowerCase();
+  if (!reportValues.has(value)) {
+    throw new Error(`Invalid report value "${raw}". Use none or pdf.`);
+  }
+  return value;
+}
+
+// src/diagnostics.ts
+function redactSecrets(text, env = process.env) {
+  let redacted = text;
+  const values = Object.entries(env).filter(([name, value]) => /(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)/i.test(name) && value && value.length >= 8).map(([, value]) => value).sort((left, right) => right.length - left.length);
+  for (const value of values) {
+    redacted = redacted.split(value).join("[redacted]");
+  }
+  return redacted.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]").replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted]").replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[redacted]").replace(/https?:\/\/[^\s"<>]+/g, (url) => {
+    try {
+      const parsed = new URL(url);
+      parsed.username = "";
+      parsed.password = "";
+      return `${parsed.origin}${parsed.pathname}${parsed.search ? "?[redacted]" : ""}`;
+    } catch {
+      return "[redacted-url]";
+    }
+  });
+}
+function wrapperErrorCode(phase) {
+  return { authentication: "CI_OIDC", bootstrap: "CI_BOOTSTRAP", download: "CI_DOWNLOAD", scanner: "CI_SCANNER_PROCESS" }[phase];
+}
+async function writeWrapperFailure(input) {
+  const env = input.env ?? process.env;
+  const message = redactSecrets(input.error instanceof Error ? input.error.message : String(input.error), env).slice(-8e3);
+  const diagnosticPath = artifactPath(input.options.workspace, input.options.outDir, "oryon-wrapper-diagnostic.json");
+  const logPath = artifactPath(input.options.workspace, input.options.outDir, "oryon-wrapper.log");
+  await import_promises.default.mkdir(artifactPath(input.options.workspace, input.options.outDir, "."), { recursive: true });
+  await import_promises.default.writeFile(diagnosticPath, `${JSON.stringify({
+    runId: input.runId,
+    status: "failed",
+    phase: input.phase,
+    startedAt: input.startedAt,
+    endedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    error: {
+      code: wrapperErrorCode(input.phase),
+      message
+    }
+  }, null, 2)}
+`, { mode: 384 });
+  await import_promises.default.writeFile(logPath, `[${input.phase}] ${message}
+Support run ID: ${input.runId}
+`, { mode: 384 });
+  return diagnosticPath;
+}
+async function submitWrapperTelemetry(input) {
+  const errorMessage = input.error === void 0 ? void 0 : redactSecrets(
+    input.error instanceof Error ? input.error.message : String(input.error)
+  ).slice(-4e3);
+  const terminal = input.status === "failed";
+  const endedAt = /* @__PURE__ */ new Date();
+  const response = await (input.fetchImpl ?? fetch)(`${input.options.backendUrl}/api/v1/scan-telemetry`, {
+    method: "POST",
+    signal: AbortSignal.timeout(5e3),
+    headers: { Authorization: `Bearer ${input.ciToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ report: {
+      run_id: input.runId,
+      status: input.status,
+      client_name: "github-action",
+      client_version: "0.1.1",
+      platform: process.platform,
+      architecture: process.arch,
+      started_at: input.startedAt,
+      ...terminal ? { ended_at: endedAt.toISOString(), duration_ms: Math.max(0, endedAt.getTime() - Date.parse(input.startedAt)) } : {},
+      phase: input.phase === "scanner" ? "scan" : "preflight",
+      metrics_json: { phase: input.phase },
+      ...input.error === void 0 ? {} : {
+        error_code: wrapperErrorCode(input.phase),
+        error_message: errorMessage
+      }
+    } })
+  });
+  if (!response.ok) {
+    throw new Error(`Attempt status could not be recorded (${response.status}).`);
+  }
+}
+
 // src/bootstrap.ts
-var ACTION_VERSION = "0.1.0";
+var ACTION_VERSION = "0.1.1";
 var OIDC_HEADER = "X-Oryon-GitHub-OIDC-Token";
 async function requestBootstrap(input) {
   const response = await fetch(`${input.options.backendUrl}/api/v1/ci/bootstrap`, {
@@ -20064,66 +20196,20 @@ function stringValue(value) {
   return typeof value === "string" && value.trim() ? value.trim() : void 0;
 }
 
-// src/config.ts
-var import_node_path = __toESM(require("node:path"), 1);
-var DEFAULT_BACKEND_URL = "https://dashboard.oryontechnology.com";
-var failOnValues = /* @__PURE__ */ new Set(["none", "low", "medium", "high", "critical"]);
-var reportValues = /* @__PURE__ */ new Set(["none", "pdf"]);
-function readActionOptions() {
-  const workspaceInput = getInput("workspace") || ".";
-  const outDir = getInput("out-dir") || ".oryon";
-  return {
-    backendUrl: normalizeBackendUrl(getInput("backend-url") || DEFAULT_BACKEND_URL),
-    workspace: import_node_path.default.resolve(workspaceInput),
-    outDir,
-    scannerVersion: getInput("scanner-version") || "v1",
-    upload: getBooleanInput("upload"),
-    ai: getBooleanInput("ai"),
-    report: parseReport(getInput("report") || "none"),
-    sarif: getBooleanInput("sarif"),
-    failOn: parseFailOn(getInput("fail-on") || "none")
-  };
-}
-function artifactPath(workspace, outDir, filename) {
-  const base = import_node_path.default.isAbsolute(outDir) ? outDir : import_node_path.default.resolve(workspace, outDir);
-  return import_node_path.default.join(base, filename);
-}
-function normalizeBackendUrl(raw) {
-  const parsed = new URL(raw);
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    throw new Error(`Unsupported backend URL protocol: ${parsed.protocol}`);
-  }
-  return parsed.origin;
-}
-function parseFailOn(raw) {
-  const value = raw.toLowerCase();
-  if (!failOnValues.has(value)) {
-    throw new Error(`Invalid fail-on value "${raw}". Use none, low, medium, high, or critical.`);
-  }
-  return value;
-}
-function parseReport(raw) {
-  const value = raw.toLowerCase();
-  if (!reportValues.has(value)) {
-    throw new Error(`Invalid report value "${raw}". Use none or pdf.`);
-  }
-  return value;
-}
-
 // src/download.ts
 var import_node_crypto = require("node:crypto");
 var import_node_fs = __toESM(require("node:fs"), 1);
-var import_promises = __toESM(require("node:fs/promises"), 1);
+var import_promises2 = __toESM(require("node:fs/promises"), 1);
 var import_node_os = __toESM(require("node:os"), 1);
 var import_node_path2 = __toESM(require("node:path"), 1);
 var import_node_stream = require("node:stream");
-var import_promises2 = require("node:stream/promises");
+var import_promises3 = require("node:stream/promises");
 var import_node_child_process = require("node:child_process");
 async function installScanner(scanner) {
-  const rootDir = await import_promises.default.mkdtemp(import_node_path2.default.join(import_node_os.default.tmpdir(), "oryon-scanner-"));
+  const rootDir = await import_promises2.default.mkdtemp(import_node_path2.default.join(import_node_os.default.tmpdir(), "oryon-scanner-"));
   const archivePath = import_node_path2.default.join(rootDir, "scanner.tar.gz");
   const extractDir = import_node_path2.default.join(rootDir, "scanner");
-  await import_promises.default.mkdir(extractDir, { recursive: true });
+  await import_promises2.default.mkdir(extractDir, { recursive: true });
   await downloadFile(scanner.url, archivePath);
   const actualSha256 = await sha256File(archivePath);
   if (actualSha256 !== scanner.sha256.toLowerCase()) {
@@ -20131,8 +20217,8 @@ async function installScanner(scanner) {
   }
   await extractTarGz(archivePath, extractDir);
   const entrypoint = safeResolve(extractDir, scanner.entrypoint);
-  await import_promises.default.access(entrypoint, import_node_fs.default.constants.X_OK).catch(async () => {
-    await import_promises.default.chmod(entrypoint, 493);
+  await import_promises2.default.access(entrypoint, import_node_fs.default.constants.X_OK).catch(async () => {
+    await import_promises2.default.chmod(entrypoint, 493);
   });
   return { rootDir, entrypoint };
 }
@@ -20142,7 +20228,7 @@ async function downloadFile(url, destination) {
     throw new Error(`Scanner download failed (${response.status}).`);
   }
   const nodeStream = import_node_stream.Readable.fromWeb(response.body);
-  await (0, import_promises2.pipeline)(nodeStream, import_node_fs.default.createWriteStream(destination, { mode: 384 }));
+  await (0, import_promises3.pipeline)(nodeStream, import_node_fs.default.createWriteStream(destination, { mode: 384 }));
 }
 async function sha256File(filePath) {
   const hash = (0, import_node_crypto.createHash)("sha256");
@@ -20179,40 +20265,63 @@ function safeResolve(rootDir, relativePath) {
 }
 
 // src/outputs.ts
-var import_promises3 = __toESM(require("node:fs/promises"), 1);
-async function setScannerOutputs(options) {
-  const resultsPath = artifactPath(options.workspace, options.outDir, "oryon-results.json");
-  const summaryPath = artifactPath(options.workspace, options.outDir, "oryon-summary.md");
-  const sarifPath = artifactPath(options.workspace, options.outDir, "oryon.sarif");
-  const reportPath = artifactPath(options.workspace, options.outDir, "oryon-report.pdf");
-  setOutput("results-path", resultsPath);
-  setOutput("summary-path", summaryPath);
-  if (options.sarif) {
-    setOutput("sarif-path", sarifPath);
+var import_promises4 = __toESM(require("node:fs/promises"), 1);
+async function setScannerOutputs(options, includeScannerArtifacts = true) {
+  for (const [name, value] of Object.entries(await collectScannerOutputs(options, includeScannerArtifacts))) {
+    setOutput(name, value);
   }
-  if (options.report === "pdf") {
-    setOutput("report-path", reportPath);
+}
+async function collectScannerOutputs(options, includeScannerArtifacts = true) {
+  const artifacts = [["diagnostic-path", "oryon-wrapper-diagnostic.json"]];
+  if (includeScannerArtifacts) artifacts.push(
+    ["results-path", "oryon-results.json"],
+    ["summary-path", "oryon-summary.md"],
+    ["run-path", "oryon-run.json"]
+  );
+  if (includeScannerArtifacts && options.sarif) artifacts.push(["sarif-path", "oryon.sarif"]);
+  if (includeScannerArtifacts && options.report === "pdf") artifacts.push(["report-path", "oryon-report.pdf"]);
+  const outputs = {};
+  for (const [name, filename] of artifacts) {
+    const filenamePath = artifactPath(options.workspace, options.outDir, filename);
+    if (await isFile(filenamePath)) outputs[name] = filenamePath;
   }
-  const findings = await readFindingsCount(resultsPath);
-  if (findings !== void 0) {
-    setOutput("findings", String(findings));
+  for (const filename of includeScannerArtifacts ? ["oryon-scanner.log", "oryon-wrapper.log"] : ["oryon-wrapper.log"]) {
+    const filenamePath = artifactPath(options.workspace, options.outDir, filename);
+    if (await isFile(filenamePath)) {
+      outputs["log-path"] = filenamePath;
+      break;
+    }
+  }
+  if (outputs["results-path"]) {
+    const findings = await readFindingsCount(outputs["results-path"]);
+    if (findings !== void 0) outputs.findings = String(findings);
+  }
+  return outputs;
+}
+async function isFile(filename) {
+  try {
+    return (await import_promises4.default.stat(filename)).isFile();
+  } catch {
+    return false;
   }
 }
 async function readFindingsCount(resultsPath) {
   try {
-    const raw = JSON.parse(await import_promises3.default.readFile(resultsPath, "utf8"));
-    const root = raw && typeof raw === "object" ? raw : {};
-    const stats = root.stats && typeof root.stats === "object" ? root.stats : {};
-    if (typeof stats.findings === "number") {
-      return stats.findings;
-    }
-    if (Array.isArray(root.findings)) {
-      return root.findings.length;
+    const raw = JSON.parse(await import_promises4.default.readFile(resultsPath, "utf8"));
+    const root = asRecord2(raw);
+    const scan = root.scan && typeof root.scan === "object" ? asRecord2(root.scan) : root;
+    if (Array.isArray(scan.findings)) return scan.findings.length;
+    const stats = asRecord2(scan.stats);
+    if (typeof stats.findings === "number" && Number.isFinite(stats.findings) && stats.findings >= 0) {
+      return Math.trunc(stats.findings);
     }
   } catch {
     return void 0;
   }
   return void 0;
+}
+function asRecord2(value) {
+  return value && typeof value === "object" ? value : {};
 }
 
 // src/scanner.ts
@@ -20260,17 +20369,25 @@ function buildScannerEnv(input) {
 }
 function runScanner(input) {
   return new Promise((resolve, reject) => {
+    let stderrTail = "";
     const child = (0, import_node_child_process2.spawn)(input.executable, buildScannerArgs(input.options), {
       cwd: input.options.workspace,
       env: input.env,
-      stdio: ["ignore", "inherit", "inherit"]
+      stdio: ["ignore", "inherit", "pipe"]
+    });
+    child.stderr.on("data", (chunk) => {
+      process.stderr.write(chunk);
+      stderrTail = `${stderrTail}${chunk.toString("utf8")}`.slice(-8e3);
     });
     child.on("error", reject);
-    child.on("exit", (code) => {
+    child.on("close", (code, signal) => {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`Oryon scanner exited with code ${code ?? "unknown"}.`));
+        const detail = redactSecrets(stderrTail.trim(), input.env);
+        const reason = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
+        reject(new Error(`Oryon scanner exited with ${reason}.${detail ? `
+${detail}` : ""}`));
       }
     });
   });
@@ -20281,27 +20398,73 @@ var OIDC_AUDIENCE = "oryon-ci";
 async function main() {
   const options = readActionOptions();
   const ciToken = process.env.ORYON_CI_TOKEN?.trim();
-  if (!ciToken) {
-    throw new Error("ORYON_CI_TOKEN is required. Add it as a repository secret and pass it to the Oryon reusable workflow.");
-  }
-  setSecret(ciToken);
-  info("Requesting GitHub OIDC token.");
-  const oidcToken = await requestOidcToken();
-  setSecret(oidcToken);
-  info("Requesting Oryon CI bootstrap lease.");
-  const lease = await requestBootstrap({ options, ciToken, oidcToken });
-  if (lease.ai?.key) {
-    setSecret(lease.ai.key);
-  }
-  info(`Downloading Oryon scanner ${lease.scanner.version}.`);
-  const installed = await installScanner(lease.scanner);
-  info("Running Oryon scanner.");
-  await runScanner({
-    executable: installed.entrypoint,
+  if (ciToken) setSecret(ciToken);
+  const runId = (0, import_node_crypto2.randomUUID)();
+  const startedAt = (/* @__PURE__ */ new Date()).toISOString();
+  process.env.ORYON_RUN_ID = runId;
+  process.env.ORYON_RUN_STARTED_AT = startedAt;
+  setOutput("run-id", runId);
+  info(`Oryon support run ID: ${runId}`);
+  let phase = "authentication";
+  let scannerStarted = false;
+  const secrets = { ...process.env };
+  const telemetry = (status, error2) => ciToken ? submitWrapperTelemetry({
     options,
-    env: buildScannerEnv({ ciToken, ai: lease.ai })
-  });
-  await setScannerOutputs(options);
+    ciToken,
+    runId,
+    startedAt,
+    status,
+    phase,
+    error: error2
+  }).catch((telemetryError) => {
+    warning(telemetryError instanceof Error ? telemetryError.message : "Attempt status could not be recorded.");
+  }) : Promise.resolve();
+  try {
+    if (!ciToken) {
+      throw new Error("ORYON_CI_TOKEN is required. Add it as a repository secret and pass it to the Oryon reusable workflow.");
+    }
+    await telemetry("running");
+    info("Requesting GitHub OIDC token.");
+    const oidcToken = await requestOidcToken();
+    setSecret(oidcToken);
+    secrets.ORYON_OIDC_TOKEN = oidcToken;
+    phase = "bootstrap";
+    info("Requesting Oryon CI bootstrap lease.");
+    const lease = await requestBootstrap({ options, ciToken, oidcToken });
+    if (lease.ai?.key) {
+      setSecret(lease.ai.key);
+      secrets.ORYON_AI_PROVIDER_KEY = lease.ai.key;
+    }
+    phase = "download";
+    info(`Downloading Oryon scanner ${lease.scanner.version}.`);
+    const installed = await installScanner(lease.scanner);
+    phase = "scanner";
+    info("Running Oryon scanner.");
+    scannerStarted = true;
+    await runScanner({
+      executable: installed.entrypoint,
+      options,
+      env: buildScannerEnv({ ciToken, ai: lease.ai })
+    });
+  } catch (error2) {
+    await writeWrapperFailure({ options, runId, startedAt, phase, error: error2, env: secrets }).catch((artifactError) => {
+      warning(`Could not save wrapper diagnostics: ${artifactError instanceof Error ? artifactError.message : String(artifactError)}`);
+    });
+    let scannerRecordedTerminalState = false;
+    if (scannerStarted) {
+      try {
+        const state = JSON.parse(await import_promises5.default.readFile(artifactPath(options.workspace, options.outDir, "oryon-run.json"), "utf8"));
+        scannerRecordedTerminalState = state.runId === runId && ["completed", "partial", "failed", "cancelled"].includes(state.status);
+      } catch {
+      }
+    }
+    if (!scannerRecordedTerminalState) await telemetry("failed", error2);
+    throw new Error(`[${phase}] ${redactSecrets(error2 instanceof Error ? error2.message : String(error2), secrets)} Support run ID: ${runId}`);
+  } finally {
+    await setScannerOutputs(options, scannerStarted).catch((error2) => {
+      warning(`Could not collect Oryon artifact outputs: ${error2 instanceof Error ? error2.message : String(error2)}`);
+    });
+  }
 }
 async function requestOidcToken() {
   try {

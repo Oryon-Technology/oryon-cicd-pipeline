@@ -1,6 +1,9 @@
 import * as core from "@actions/core";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import { redactSecrets, submitWrapperTelemetry, writeWrapperFailure, type WrapperPhase } from "./diagnostics.js";
 import { requestBootstrap } from "./bootstrap.js";
-import { readActionOptions } from "./config.js";
+import { artifactPath, readActionOptions } from "./config.js";
 import { installScanner } from "./download.js";
 import { setScannerOutputs } from "./outputs.js";
 import { buildScannerEnv, runScanner } from "./scanner.js";
@@ -10,32 +13,73 @@ const OIDC_AUDIENCE = "oryon-ci";
 async function main(): Promise<void> {
   const options = readActionOptions();
   const ciToken = process.env.ORYON_CI_TOKEN?.trim();
-  if (!ciToken) {
-    throw new Error("ORYON_CI_TOKEN is required. Add it as a repository secret and pass it to the Oryon reusable workflow.");
+  if (ciToken) core.setSecret(ciToken);
+
+  const runId = randomUUID();
+  const startedAt = new Date().toISOString();
+  process.env.ORYON_RUN_ID = runId;
+  process.env.ORYON_RUN_STARTED_AT = startedAt;
+  core.setOutput("run-id", runId);
+  core.info(`Oryon support run ID: ${runId}`);
+  let phase: WrapperPhase = "authentication";
+  let scannerStarted = false;
+  const secrets: NodeJS.ProcessEnv = { ...process.env };
+  const telemetry = (status: "running" | "failed", error?: unknown) => ciToken ? submitWrapperTelemetry({
+    options, ciToken, runId, startedAt, status, phase, error
+  }).catch((telemetryError: unknown) => {
+    core.warning(telemetryError instanceof Error ? telemetryError.message : "Attempt status could not be recorded.");
+  }) : Promise.resolve();
+
+  try {
+    if (!ciToken) {
+      throw new Error("ORYON_CI_TOKEN is required. Add it as a repository secret and pass it to the Oryon reusable workflow.");
+    }
+    await telemetry("running");
+    core.info("Requesting GitHub OIDC token.");
+    const oidcToken = await requestOidcToken();
+    core.setSecret(oidcToken);
+    secrets.ORYON_OIDC_TOKEN = oidcToken;
+
+    phase = "bootstrap";
+    core.info("Requesting Oryon CI bootstrap lease.");
+    const lease = await requestBootstrap({ options, ciToken, oidcToken });
+    if (lease.ai?.key) {
+      core.setSecret(lease.ai.key);
+      secrets.ORYON_AI_PROVIDER_KEY = lease.ai.key;
+    }
+
+    phase = "download";
+    core.info(`Downloading Oryon scanner ${lease.scanner.version}.`);
+    const installed = await installScanner(lease.scanner);
+
+    phase = "scanner";
+    core.info("Running Oryon scanner.");
+    scannerStarted = true;
+    await runScanner({
+      executable: installed.entrypoint,
+      options,
+      env: buildScannerEnv({ ciToken, ai: lease.ai })
+    });
+  } catch (error) {
+    await writeWrapperFailure({ options, runId, startedAt, phase, error, env: secrets }).catch((artifactError: unknown) => {
+      core.warning(`Could not save wrapper diagnostics: ${artifactError instanceof Error ? artifactError.message : String(artifactError)}`);
+    });
+    // Once the scanner starts, its richer telemetry is authoritative (including
+    // successful scans that fail a severity gate). Do not overwrite it here.
+    let scannerRecordedTerminalState = false;
+    if (scannerStarted) {
+      try {
+        const state = JSON.parse(await fs.readFile(artifactPath(options.workspace, options.outDir, "oryon-run.json"), "utf8"));
+        scannerRecordedTerminalState = state.runId === runId && ["completed", "partial", "failed", "cancelled"].includes(state.status);
+      } catch { /* A process killed before it can write its state is recorded by the wrapper. */ }
+    }
+    if (!scannerRecordedTerminalState) await telemetry("failed", error);
+    throw new Error(`[${phase}] ${redactSecrets(error instanceof Error ? error.message : String(error), secrets)} Support run ID: ${runId}`);
+  } finally {
+    await setScannerOutputs(options, scannerStarted).catch((error: unknown) => {
+      core.warning(`Could not collect Oryon artifact outputs: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
-  core.setSecret(ciToken);
-
-  core.info("Requesting GitHub OIDC token.");
-  const oidcToken = await requestOidcToken();
-  core.setSecret(oidcToken);
-
-  core.info("Requesting Oryon CI bootstrap lease.");
-  const lease = await requestBootstrap({ options, ciToken, oidcToken });
-  if (lease.ai?.key) {
-    core.setSecret(lease.ai.key);
-  }
-
-  core.info(`Downloading Oryon scanner ${lease.scanner.version}.`);
-  const installed = await installScanner(lease.scanner);
-
-  core.info("Running Oryon scanner.");
-  await runScanner({
-    executable: installed.entrypoint,
-    options,
-    env: buildScannerEnv({ ciToken, ai: lease.ai })
-  });
-
-  await setScannerOutputs(options);
 }
 
 async function requestOidcToken(): Promise<string> {
@@ -56,4 +100,3 @@ async function requestOidcToken(): Promise<string> {
 main().catch((error: unknown) => {
   core.setFailed(error instanceof Error ? error.message : String(error));
 });
-

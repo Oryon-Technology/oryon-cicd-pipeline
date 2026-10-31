@@ -1,6 +1,6 @@
 import type { BootstrapLease, BootstrapRequest, WrapperOptions } from "./types.js";
 
-const ACTION_VERSION = "0.1.0";
+const ACTION_VERSION = "0.1.1";
 const OIDC_HEADER = "X-Oryon-GitHub-OIDC-Token";
 
 export async function requestBootstrap(input: {

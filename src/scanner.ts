@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { AiLease, WrapperOptions } from "./types.js";
+import { redactSecrets } from "./diagnostics.js";
 
 export function buildScannerArgs(options: WrapperOptions): string[] {
   const args = [
@@ -57,17 +58,25 @@ export function runScanner(input: {
   env: NodeJS.ProcessEnv;
 }): Promise<void> {
   return new Promise((resolve, reject) => {
+    let stderrTail = "";
     const child = spawn(input.executable, buildScannerArgs(input.options), {
       cwd: input.options.workspace,
       env: input.env,
-      stdio: ["ignore", "inherit", "inherit"]
+      stdio: ["ignore", "inherit", "pipe"]
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      process.stderr.write(chunk);
+      stderrTail = `${stderrTail}${chunk.toString("utf8")}`.slice(-8_000);
     });
     child.on("error", reject);
-    child.on("exit", (code) => {
+    // close waits for stderr to drain; exit can lose the final error text.
+    child.on("close", (code, signal) => {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`Oryon scanner exited with code ${code ?? "unknown"}.`));
+        const detail = redactSecrets(stderrTail.trim(), input.env);
+        const reason = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
+        reject(new Error(`Oryon scanner exited with ${reason}.${detail ? `\n${detail}` : ""}`));
       }
     });
   });

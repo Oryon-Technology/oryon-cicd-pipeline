@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -10,7 +10,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const WRAPPER_VERSION = "0.1.0";
+const WRAPPER_VERSION = "0.1.1";
 const DEFAULT_BACKEND_URL = "https://dashboard.oryontechnology.com";
 const AZURE_DEVOPS_API_VERSION = "7.1";
 const AZURE_OIDC_HEADER = "X-Oryon-Azure-OIDC-Token";
@@ -19,28 +19,63 @@ const reportValues = new Set(["none", "pdf"]);
 
 export async function runAzureWrapper(env = process.env) {
   const options = readAzureOptions(env);
-  const ciToken = requireEnv(env, "ORYON_CI_TOKEN");
-  setAzureSecret(ciToken);
+  const ciToken = env.ORYON_CI_TOKEN?.trim();
+  if (ciToken) setAzureSecret(ciToken);
 
-  log("Requesting Azure Pipelines OIDC token.");
-  const oidcToken = await requestAzureOidcToken(env);
-  setAzureSecret(oidcToken);
+  const runId = randomUUID();
+  const startedAt = new Date().toISOString();
+  const scannerEnv = { ...env, ORYON_RUN_ID: runId, ORYON_RUN_STARTED_AT: startedAt };
+  const secrets = { ...scannerEnv };
+  let phase = "authentication";
+  let scannerStarted = false;
+  log(`Oryon support run ID: ${runId}`);
+  const telemetry = (status, error) => ciToken ? submitWrapperTelemetry({ options, ciToken, runId, startedAt, status, phase, error, env: secrets })
+    .catch((telemetryError) => log(`Warning: ${telemetryError.message}`)) : Promise.resolve();
+  try {
+    if (!ciToken) throw new Error("ORYON_CI_TOKEN is required.");
+    await telemetry("running");
+    log("Requesting Azure Pipelines OIDC token.");
+    const oidcToken = await requestAzureOidcToken(env);
+    setAzureSecret(oidcToken);
+    secrets.ORYON_OIDC_TOKEN = oidcToken;
 
-  log("Requesting Oryon CI bootstrap lease.");
-  const lease = await requestBootstrap({ options, ciToken, oidcToken, env });
-  if (lease.ai?.key) {
-    setAzureSecret(lease.ai.key);
+    phase = "bootstrap";
+    log("Requesting Oryon CI bootstrap lease.");
+    const lease = await requestBootstrap({ options, ciToken, oidcToken, env });
+    if (lease.ai?.key) {
+      setAzureSecret(lease.ai.key);
+      secrets.ORYON_AI_PROVIDER_KEY = lease.ai.key;
+    }
+
+    phase = "download";
+    log(`Downloading Oryon scanner ${lease.scanner.version}.`);
+    const installed = await installScanner(lease.scanner);
+
+    phase = "scanner";
+    scannerStarted = true;
+    log("Running Oryon scanner.");
+    await runScanner({ executable: installed.entrypoint, options, env: buildScannerEnv({ env: scannerEnv, ciToken, ai: lease.ai }) });
+  } catch (error) {
+    const message = redactSecrets(error instanceof Error ? error.message : String(error), secrets).slice(-8_000);
+    const base = path.isAbsolute(options.outDir) ? options.outDir : path.resolve(options.workspace, options.outDir);
+    await (async () => {
+      await fsp.mkdir(base, { recursive: true });
+      await fsp.writeFile(path.join(base, "oryon-wrapper-diagnostic.json"), `${JSON.stringify({
+        runId, status: "failed", phase, startedAt, endedAt: new Date().toISOString(),
+        error: { code: wrapperErrorCode(phase), message }
+      }, null, 2)}\n`, { mode: 0o600 });
+      await fsp.writeFile(path.join(base, "oryon-wrapper.log"), `[${phase}] ${message}\nSupport run ID: ${runId}\n`, { mode: 0o600 });
+    })().catch((artifactError) => log(`Warning: Could not save wrapper diagnostics: ${artifactError.message}`));
+    let scannerRecordedTerminalState = false;
+    if (scannerStarted) {
+      try {
+        const state = JSON.parse(await fsp.readFile(path.join(base, "oryon-run.json"), "utf8"));
+        scannerRecordedTerminalState = state.runId === runId && ["completed", "partial", "failed", "cancelled"].includes(state.status);
+      } catch { /* The wrapper records a process that failed before writing its state. */ }
+    }
+    if (!scannerRecordedTerminalState) await telemetry("failed", error);
+    throw new Error(`[${phase}] ${message} Support run ID: ${runId}`);
   }
-
-  log(`Downloading Oryon scanner ${lease.scanner.version}.`);
-  const installed = await installScanner(lease.scanner);
-
-  log("Running Oryon scanner.");
-  await runScanner({
-    executable: installed.entrypoint,
-    options,
-    env: buildScannerEnv({ env, ciToken, ai: lease.ai })
-  });
 }
 
 export function readAzureOptions(env = process.env, cwd = process.cwd()) {
@@ -282,20 +317,73 @@ export function buildScannerEnv({ env = process.env, ciToken, ai }) {
 
 export function runScanner({ executable, options, env }) {
   return new Promise((resolve, reject) => {
+    let stderrTail = "";
     const child = spawn(executable, buildScannerArgs(options), {
       cwd: options.workspace,
       env,
-      stdio: ["ignore", "inherit", "inherit"]
+      stdio: ["ignore", "inherit", "pipe"]
+    });
+    child.stderr.on("data", (chunk) => {
+      process.stderr.write(chunk);
+      stderrTail = `${stderrTail}${chunk.toString("utf8")}`.slice(-8_000);
     });
     child.on("error", reject);
-    child.on("exit", (code) => {
+    child.on("close", (code, signal) => {
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`Oryon scanner exited with code ${code ?? "unknown"}.`));
+        const detail = redactSecrets(stderrTail.trim(), env);
+        const reason = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
+        reject(new Error(`Oryon scanner exited with ${reason}.${detail ? `\n${detail}` : ""}`));
       }
     });
   });
+}
+
+function wrapperErrorCode(phase) {
+  return { authentication: "CI_OIDC", bootstrap: "CI_BOOTSTRAP", download: "CI_DOWNLOAD", scanner: "CI_SCANNER_PROCESS" }[phase];
+}
+
+export function redactSecrets(text, env = process.env) {
+  let redacted = text;
+  const values = Object.entries(env)
+    .filter(([name, value]) => /(?:TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL)/i.test(name) && value && value.length >= 8)
+    .map(([, value]) => value)
+    .sort((left, right) => right.length - left.length);
+  for (const value of values) redacted = redacted.split(value).join("[redacted]");
+  return redacted
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, "[redacted]")
+    .replace(/\bsk-[A-Za-z0-9_-]{12,}\b/g, "[redacted]")
+    .replace(/https?:\/\/[^\s"<>]+/g, (url) => {
+      try {
+        const parsed = new URL(url);
+        parsed.username = "";
+        parsed.password = "";
+        return `${parsed.origin}${parsed.pathname}${parsed.search ? "?[redacted]" : ""}`;
+      } catch { return "[redacted-url]"; }
+    });
+}
+
+export async function submitWrapperTelemetry({ options, ciToken, runId, startedAt, status, phase, error, env = process.env, fetchImpl = fetch }) {
+  const terminal = status === "failed";
+  const endedAt = new Date();
+  const response = await fetchImpl(`${options.backendUrl}/api/v1/scan-telemetry`, {
+    method: "POST",
+    signal: AbortSignal.timeout(5_000),
+    headers: { Authorization: `Bearer ${ciToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ report: {
+      run_id: runId, status, client_name: "github-action", client_version: WRAPPER_VERSION,
+      platform: process.platform, architecture: process.arch, started_at: startedAt,
+      ...(terminal ? { ended_at: endedAt.toISOString(), duration_ms: Math.max(0, endedAt.getTime() - Date.parse(startedAt)) } : {}),
+      phase: phase === "scanner" ? "scan" : "preflight", metrics_json: { phase },
+      ...(error === undefined ? {} : {
+        error_code: wrapperErrorCode(phase),
+        error_message: redactSecrets(error instanceof Error ? error.message : String(error), env).slice(-4_000)
+      })
+    } })
+  });
+  if (!response.ok) throw new Error(`Attempt status could not be recorded (${response.status}).`);
 }
 
 async function downloadFile(url, destination) {
@@ -392,14 +480,6 @@ function parseReport(raw) {
   const value = String(raw).trim().toLowerCase();
   if (!reportValues.has(value)) {
     throw new Error(`Invalid ORYON_REPORT value "${raw}". Use none or pdf.`);
-  }
-  return value;
-}
-
-function requireEnv(env, name) {
-  const value = env[name]?.trim();
-  if (!value) {
-    throw new Error(`${name} is required.`);
   }
   return value;
 }

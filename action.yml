@@ -41,6 +41,14 @@ inputs:
     default: none
 
 outputs:
+  run-id:
+    description: Support identifier shared with the scanner and dashboard.
+  run-path:
+    description: Local scanner execution state, when available.
+  diagnostic-path:
+    description: Local wrapper failure diagnostic, when available.
+  log-path:
+    description: Local diagnostic log, when available.
   findings:
     description: Number of findings produced by the scan when the scanner writes an Oryon results artifact.
   results-path:

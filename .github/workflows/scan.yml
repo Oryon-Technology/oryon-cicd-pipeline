@@ -43,6 +43,18 @@ on:
         description: Project-scoped Oryon CI token.
         required: true
     outputs:
+      run-id:
+        description: Support identifier shared with the scanner and dashboard.
+        value: ${{ jobs.scan.outputs.run-id }}
+      run-path:
+        description: Local scanner execution state, when available.
+        value: ${{ jobs.scan.outputs.run-path }}
+      diagnostic-path:
+        description: Local wrapper failure diagnostic, when available.
+        value: ${{ jobs.scan.outputs.diagnostic-path }}
+      log-path:
+        description: Local diagnostic log, when available.
+        value: ${{ jobs.scan.outputs.log-path }}
       findings:
         description: Number of findings produced by the scan.
         value: ${{ jobs.scan.outputs.findings }}
@@ -66,6 +78,10 @@ jobs:
       contents: read
       id-token: write
     outputs:
+      run-id: ${{ steps.oryon.outputs.run-id }}
+      run-path: ${{ steps.oryon.outputs.run-path }}
+      diagnostic-path: ${{ steps.oryon.outputs.diagnostic-path }}
+      log-path: ${{ steps.oryon.outputs.log-path }}
       findings: ${{ steps.oryon.outputs.findings }}
       results-path: ${{ steps.oryon.outputs.results-path }}
       summary-path: ${{ steps.oryon.outputs.summary-path }}
