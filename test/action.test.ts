@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 const exec = promisify(execFile);
 const root = path.resolve(import.meta.dirname, "..");
 
-async function actionFixture(input: { bootstrapFailure?: boolean; threshold?: boolean; azure?: boolean; killed?: boolean }) {
+async function actionFixture(input: { bootstrapFailure?: boolean; threshold?: boolean; azure?: boolean; killed?: boolean; app?: boolean }) {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "oryon-wrapper-test-"));
   const workspace = path.join(temp, "repo");
   await fs.mkdir(workspace);
@@ -21,6 +21,7 @@ const fs = require('node:fs');
 fs.mkdirSync('.oryon', { recursive: true });
 fs.writeFileSync('.oryon/oryon-results.json', JSON.stringify({ scan: { findings: [{}, {}, {}], stats: { findings: 3 } } }));
 fs.writeFileSync('.oryon/oryon-summary.md', 'Partial evidence');
+fs.writeFileSync('.oryon/arguments.json', JSON.stringify(process.argv.slice(2)));
 fs.writeFileSync('.oryon/oryon-run.json', JSON.stringify({ runId: process.env.ORYON_RUN_ID, status: '${input.killed ? "running" : input.threshold ? "completed" : "failed"}' }));
 console.error('${input.threshold ? "Severity threshold exceeded" : "Suppression lookup failed: HTTP 403"} '+process.env.ORYON_AI_PROVIDER_KEY);
 ${input.killed ? "process.kill(process.pid, 'SIGTERM');" : `process.exit(${input.threshold ? 2 : 1});`}
@@ -30,6 +31,7 @@ ${input.killed ? "process.kill(process.pid, 'SIGTERM');" : `process.exit(${input
   await exec("tar", ["-czf", archivePath, "-C", path.join(temp, "scanner"), "cli.cjs"]);
   const archive = await fs.readFile(archivePath);
   const reports: Record<string, unknown>[] = [];
+  let bootstrapAuthorization: string | undefined;
   const server = createServer(async (request, response) => {
     if (request.url?.startsWith("/oidc")) {
       response.setHeader("Content-Type", "application/json");
@@ -38,6 +40,7 @@ ${input.killed ? "process.kill(process.pid, 'SIGTERM');" : `process.exit(${input
       reports.push(JSON.parse(await body(request)).report);
       response.end("{}");
     } else if (request.url === "/api/v1/ci/bootstrap") {
+      bootstrapAuthorization = request.headers.authorization;
       await body(request);
       response.setHeader("Content-Type", "application/json");
       if (input.bootstrapFailure) {
@@ -47,7 +50,8 @@ ${input.killed ? "process.kill(process.pid, 'SIGTERM');" : `process.exit(${input
         const address = server.address();
         assert.ok(address && typeof address !== "string");
         response.end(JSON.stringify({
-          scanner: { url: `http://127.0.0.1:${address.port}/scanner.tar.gz`, sha256: createHash("sha256").update(archive).digest("hex"), version: "test", entrypoint: "cli.cjs" },
+          scanner: { url: `http://127.0.0.1:${address.port}/scanner.tar.gz`, sha256: createHash("sha256").update(archive).digest("hex"), version: input.app ? "2.2.8" : "test", entrypoint: "cli.cjs" },
+          ...(input.app ? { credentials: { token: "oryon_ci_temporary-test-token", expires_at: new Date(Date.now() + 600_000).toISOString() }, configuration: { revision: 7, exclusions: ["generated/**"], fail_on: "high" } } : {}),
           ai: { provider: "openai", key: "private-provider-test-key" }
         }));
       }
@@ -81,7 +85,7 @@ ${input.killed ? "process.kill(process.pid, 'SIGTERM');" : `process.exit(${input
           SYSTEM_OIDCREQUESTURI: `${origin}/oidc`,
           SYSTEM_ACCESSTOKEN: "azure-oidc-request-secret",
           GITHUB_OUTPUT: outputPath,
-          ORYON_CI_TOKEN: "private-ci-test-token",
+          ORYON_CI_TOKEN: input.app ? "" : "private-ci-test-token",
           ACTIONS_ID_TOKEN_REQUEST_URL: `${origin}/oidc`,
           ACTIONS_ID_TOKEN_REQUEST_TOKEN: "github-oidc-request-secret"
         }
@@ -92,6 +96,8 @@ ${input.killed ? "process.kill(process.pid, 'SIGTERM');" : `process.exit(${input
     return {
       exitCode,
       reports,
+      bootstrapAuthorization,
+      scannerArgs: input.bootstrapFailure ? [] : JSON.parse(await fs.readFile(path.join(workspace, ".oryon/arguments.json"), "utf8")),
       outputs: await fs.readFile(outputPath, "utf8"),
       diagnostic: JSON.parse(await fs.readFile(path.join(workspace, ".oryon", "oryon-wrapper-diagnostic.json"), "utf8")),
       log: await fs.readFile(path.join(workspace, ".oryon", "oryon-wrapper.log"), "utf8")
@@ -123,6 +129,17 @@ test("publishes real partial artifacts and useful redacted diagnostics when scan
   assert.equal(result.reports.length, 1, "scanner terminal telemetry must not be overwritten by wrapper failure");
   assert.equal(result.reports[0].status, "running");
   assert.equal(result.reports[0].run_id, result.diagnostic.runId);
+});
+
+test("GitHub App uses temporary credentials and authoritative dashboard settings without a repository secret", async () => {
+  const result = await actionFixture({ app: true });
+  assert.equal(result.bootstrapAuthorization, undefined);
+  assert.ok(result.scannerArgs.includes("generated/**"));
+  assert.ok(result.scannerArgs.includes("7"));
+  assert.equal(result.scannerArgs[result.scannerArgs.indexOf("--fail-on") + 1], "high");
+  assert.equal(result.reports.length, 1);
+  assert.doesNotMatch(JSON.stringify(result.diagnostic), /oryon_ci_temporary-test-token/);
+  assert.doesNotMatch(result.log, /oryon_ci_temporary-test-token/);
 });
 
 test("records early bootstrap failure and keeps downloadable diagnostics with the same support ID", async () => {

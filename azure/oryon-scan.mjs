@@ -10,7 +10,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const WRAPPER_VERSION = "0.1.1";
+const WRAPPER_VERSION = "0.1.3";
 const DEFAULT_BACKEND_URL = "https://dashboard.oryontechnology.com";
 const AZURE_DEVOPS_API_VERSION = "7.1";
 const AZURE_OIDC_HEADER = "X-Oryon-Azure-OIDC-Token";

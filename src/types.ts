@@ -11,6 +11,8 @@ export interface WrapperOptions {
   report: ReportKind;
   sarif: boolean;
   failOn: FailOn;
+  exclusions?: string[];
+  configurationRevision?: number;
 }
 
 export interface BootstrapRequest {
@@ -43,10 +45,11 @@ export interface AiLease {
 export interface BootstrapLease {
   scanner: ScannerLease;
   ai?: AiLease;
+  credentials?: { token: string; expiresAt: string };
+  configuration?: { revision: number; exclusions: string[]; failOn: FailOn };
 }
 
 export interface InstalledScanner {
   rootDir: string;
   entrypoint: string;
 }
-

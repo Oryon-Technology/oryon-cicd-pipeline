@@ -12,7 +12,7 @@ const OIDC_AUDIENCE = "oryon-ci";
 
 async function main(): Promise<void> {
   const options = readActionOptions();
-  const ciToken = process.env.ORYON_CI_TOKEN?.trim();
+  let ciToken = process.env.ORYON_CI_TOKEN?.trim();
   if (ciToken) core.setSecret(ciToken);
 
   const runId = randomUUID();
@@ -31,9 +31,6 @@ async function main(): Promise<void> {
   }) : Promise.resolve();
 
   try {
-    if (!ciToken) {
-      throw new Error("ORYON_CI_TOKEN is required. Add it as a repository secret and pass it to the Oryon reusable workflow.");
-    }
     await telemetry("running");
     core.info("Requesting GitHub OIDC token.");
     const oidcToken = await requestOidcToken();
@@ -43,6 +40,19 @@ async function main(): Promise<void> {
     phase = "bootstrap";
     core.info("Requesting Oryon CI bootstrap lease.");
     const lease = await requestBootstrap({ options, ciToken, oidcToken });
+    if (lease.credentials) {
+      ciToken = lease.credentials.token;
+      core.setSecret(ciToken);
+      secrets.ORYON_CI_TOKEN = ciToken;
+    }
+    if (!ciToken) throw new Error("Connect this repository through the Oryon GitHub App or provide an ORYON_CI_TOKEN.");
+    if (lease.configuration) {
+      options.failOn = lease.configuration.failOn;
+      options.exclusions = lease.configuration.exclusions;
+      options.configurationRevision = lease.configuration.revision;
+      core.info(`Using Oryon project configuration revision ${options.configurationRevision}.`);
+    }
+    if (lease.credentials) await telemetry("running");
     if (lease.ai?.key) {
       core.setSecret(lease.ai.key);
       secrets.ORYON_AI_PROVIDER_KEY = lease.ai.key;

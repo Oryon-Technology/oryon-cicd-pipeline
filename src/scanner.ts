@@ -26,6 +26,10 @@ export function buildScannerArgs(options: WrapperOptions): string[] {
   if (!options.sarif) {
     args.push("--no-sarif");
   }
+  for (const pattern of options.exclusions ?? []) args.push("--exclude", pattern);
+  if (options.configurationRevision !== undefined) {
+    args.push("--configuration-revision", String(options.configurationRevision));
+  }
 
   return args;
 }
@@ -81,4 +85,3 @@ export function runScanner(input: {
     });
   });
 }
-

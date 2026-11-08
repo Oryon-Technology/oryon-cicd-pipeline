@@ -20605,13 +20605,13 @@ async function submitWrapperTelemetry(input) {
 }
 
 // src/bootstrap.ts
-var ACTION_VERSION = "0.1.1";
+var ACTION_VERSION = "0.1.3";
 var OIDC_HEADER = "X-Oryon-GitHub-OIDC-Token";
 async function requestBootstrap(input) {
   const response = await fetch(`${input.options.backendUrl}/api/v1/ci/bootstrap`, {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${input.ciToken}`,
+      ...input.ciToken ? { "Authorization": `Bearer ${input.ciToken}` } : {},
       "Content-Type": "application/json",
       "User-Agent": `oryon-cicd-pipeline/${ACTION_VERSION}`,
       [OIDC_HEADER]: input.oidcToken
@@ -20678,6 +20678,22 @@ function normalizeBootstrapLease(payload) {
       provider: stringValue(ai.provider),
       expiresAt: stringValue(ai.expires_at)
     };
+  }
+  if (root.credentials !== void 0) {
+    const credentials = asRecord(root.credentials);
+    const token = stringValue(credentials.token);
+    const expiresAt = stringValue(credentials.expires_at);
+    if (!token?.startsWith("oryon_ci_") || !expiresAt || !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now()) {
+      throw new Error("Oryon bootstrap returned invalid temporary credentials.");
+    }
+    lease.credentials = { token, expiresAt };
+  }
+  if (root.configuration !== void 0) {
+    const config = asRecord(root.configuration);
+    if (!Number.isSafeInteger(config.revision) || Number(config.revision) < 1 || !Array.isArray(config.exclusions) || config.exclusions.length > 100 || !config.exclusions.every((value) => typeof value === "string" && value.length > 0 && value.length <= 255 && !/[\r\n\0]/.test(value)) || !["none", "low", "medium", "high", "critical"].includes(String(config.fail_on))) {
+      throw new Error("Oryon bootstrap returned an invalid project configuration.");
+    }
+    lease.configuration = { revision: Number(config.revision), exclusions: config.exclusions, failOn: config.fail_on };
   }
   return lease;
 }
@@ -20860,6 +20876,10 @@ function buildScannerArgs(options) {
   if (!options.sarif) {
     args.push("--no-sarif");
   }
+  for (const pattern of options.exclusions ?? []) args.push("--exclude", pattern);
+  if (options.configurationRevision !== void 0) {
+    args.push("--configuration-revision", String(options.configurationRevision));
+  }
   return args;
 }
 function buildScannerEnv(input) {
@@ -20908,7 +20928,7 @@ ${detail}` : ""}`));
 var OIDC_AUDIENCE = "oryon-ci";
 async function main() {
   const options = readActionOptions();
-  const ciToken = process.env.ORYON_CI_TOKEN?.trim();
+  let ciToken = process.env.ORYON_CI_TOKEN?.trim();
   if (ciToken) setSecret(ciToken);
   const runId = (0, import_node_crypto2.randomUUID)();
   const startedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -20931,9 +20951,6 @@ async function main() {
     warning(telemetryError instanceof Error ? telemetryError.message : "Attempt status could not be recorded.");
   }) : Promise.resolve();
   try {
-    if (!ciToken) {
-      throw new Error("ORYON_CI_TOKEN is required. Add it as a repository secret and pass it to the Oryon reusable workflow.");
-    }
     await telemetry("running");
     info("Requesting GitHub OIDC token.");
     const oidcToken = await requestOidcToken();
@@ -20942,6 +20959,19 @@ async function main() {
     phase = "bootstrap";
     info("Requesting Oryon CI bootstrap lease.");
     const lease = await requestBootstrap({ options, ciToken, oidcToken });
+    if (lease.credentials) {
+      ciToken = lease.credentials.token;
+      setSecret(ciToken);
+      secrets.ORYON_CI_TOKEN = ciToken;
+    }
+    if (!ciToken) throw new Error("Connect this repository through the Oryon GitHub App or provide an ORYON_CI_TOKEN.");
+    if (lease.configuration) {
+      options.failOn = lease.configuration.failOn;
+      options.exclusions = lease.configuration.exclusions;
+      options.configurationRevision = lease.configuration.revision;
+      info(`Using Oryon project configuration revision ${options.configurationRevision}.`);
+    }
+    if (lease.credentials) await telemetry("running");
     if (lease.ai?.key) {
       setSecret(lease.ai.key);
       secrets.ORYON_AI_PROVIDER_KEY = lease.ai.key;

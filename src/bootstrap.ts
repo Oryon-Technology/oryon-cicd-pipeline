@@ -1,17 +1,17 @@
 import type { BootstrapLease, BootstrapRequest, WrapperOptions } from "./types.js";
 
-const ACTION_VERSION = "0.1.1";
+const ACTION_VERSION = "0.1.3";
 const OIDC_HEADER = "X-Oryon-GitHub-OIDC-Token";
 
 export async function requestBootstrap(input: {
   options: WrapperOptions;
-  ciToken: string;
+  ciToken?: string;
   oidcToken: string;
 }): Promise<BootstrapLease> {
   const response = await fetch(`${input.options.backendUrl}/api/v1/ci/bootstrap`, {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${input.ciToken}`,
+      ...(input.ciToken ? { "Authorization": `Bearer ${input.ciToken}` } : {}),
       "Content-Type": "application/json",
       "User-Agent": `oryon-cicd-pipeline/${ACTION_VERSION}`,
       [OIDC_HEADER]: input.oidcToken
@@ -84,6 +84,26 @@ export function normalizeBootstrapLease(payload: unknown): BootstrapLease {
       provider: stringValue(ai.provider),
       expiresAt: stringValue(ai.expires_at)
     };
+  }
+
+  if (root.credentials !== undefined) {
+    const credentials = asRecord(root.credentials);
+    const token = stringValue(credentials.token);
+    const expiresAt = stringValue(credentials.expires_at);
+    if (!token?.startsWith("oryon_ci_") || !expiresAt || !Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now()) {
+      throw new Error("Oryon bootstrap returned invalid temporary credentials.");
+    }
+    lease.credentials = { token, expiresAt };
+  }
+  if (root.configuration !== undefined) {
+    const config = asRecord(root.configuration);
+    if (!Number.isSafeInteger(config.revision) || Number(config.revision) < 1 ||
+        !Array.isArray(config.exclusions) || config.exclusions.length > 100 ||
+        !config.exclusions.every((value: unknown) => typeof value === "string" && value.length > 0 && value.length <= 255 && !/[\r\n\0]/.test(value)) ||
+        !["none", "low", "medium", "high", "critical"].includes(String(config.fail_on))) {
+      throw new Error("Oryon bootstrap returned an invalid project configuration.");
+    }
+    lease.configuration = { revision: Number(config.revision), exclusions: config.exclusions, failOn: config.fail_on as WrapperOptions["failOn"] };
   }
 
   return lease;

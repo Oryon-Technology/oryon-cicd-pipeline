@@ -6,6 +6,25 @@ This repository contains only the public bootstrap layer. The scanner engine and
 
 ## GitHub Actions
 
+### GitHub App connection
+
+With the GitHub App backend enabled, open your Oryon project's Integrations tab,
+install the App for selected repositories, pick a repository and create its workflow
+pull request. Review and merge the PR in GitHub. No `ORYON_CI_TOKEN` secret is needed.
+
+The backend verifies GitHub OIDC and supplies a temporary project credential and
+the effective exclusions/severity configuration. These settings override the
+workflow's severity input for App-connected runs and are frozen for that run.
+Branches and event changes require an updated workflow PR. AI and analysis defaults
+remain unchanged. Fork pull requests are skipped explicitly.
+
+This path is prepared in wrapper **0.1.3** and requires scanner **2.2.8** plus the
+corresponding backend deployment and App registration. Publishing source alone
+does not register or activate the App. The generated workflow pins an approved
+full commit SHA; its internal action uses the versioned `v0.1.3` tag.
+
+### Existing manual connection
+
 ```yaml
 name: Oryon Security Scan
 
@@ -25,6 +44,7 @@ jobs:
 ```
 
 Configure `ORYON_CI_TOKEN` as a repository or organization secret in GitHub.
+Existing manual connections and Azure remain supported.
 
 ## Azure Pipelines
 
