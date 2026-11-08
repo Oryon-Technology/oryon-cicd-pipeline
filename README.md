@@ -18,9 +18,10 @@ workflow's severity input for App-connected runs and are frozen for that run.
 Branches and event changes require an updated workflow PR. AI and analysis defaults
 remain unchanged. Fork pull requests are skipped explicitly.
 
-This path is prepared in wrapper **0.1.3** and requires scanner **2.2.8** plus the
-corresponding backend deployment and App registration. Publishing source alone
-does not register or activate the App. The generated workflow pins an approved
+This path is available in wrapper **0.1.3**, scanner **2.2.8** and the deployed
+Oryon backend. The public App is registered under Oryon-Technology. Initial Oryon
+setup pull requests skip the scan until merged; subsequent pushes and configured
+events run normally. Publishing source alone does not register a separate App. The generated workflow pins an approved
 full commit SHA; its internal action uses the versioned `v0.1.3` tag.
 
 ### Existing manual connection
